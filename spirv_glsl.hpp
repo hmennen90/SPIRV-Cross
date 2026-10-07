@@ -468,6 +468,8 @@ protected:
 	                                bool inside_block_like_struct_scope = false,
 	                                bool inside_struct_scope = false);
 	virtual std::string constant_op_expression(const SPIRConstantOp &cop);
+	// A cooperative matrix constant fills every component with one value.
+	virtual std::string constant_cooperative_matrix_expression(const SPIRConstant &c);
 	virtual std::string constant_expression_vector(const SPIRConstant &c, uint32_t vector);
 	virtual void emit_fixup();
 	virtual std::string variable_decl(const SPIRType &type, const std::string &name, uint32_t id = 0);

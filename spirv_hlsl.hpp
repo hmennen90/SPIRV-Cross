@@ -407,6 +407,8 @@ private:
 	std::string cooperative_matrix_stride(uint32_t stride_id, const SPIRType &pointee);
 	uint32_t cooperative_matrix_alignment(const uint32_t *memory_operands, uint32_t count) const;
 	std::string cooperative_matrix_groupshared_args(uint32_t ptr, const SPIRType &matrix_type, uint32_t stride_id);
+	std::string constant_cooperative_matrix_expression(const SPIRConstant &c) override;
+	void emit_cooperative_matrix_muladd(const uint32_t *ops, uint32_t length);
 
 	std::string get_unique_identifier();
 	uint32_t unique_identifier_count = 0;
