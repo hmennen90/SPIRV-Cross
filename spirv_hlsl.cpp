@@ -844,7 +844,7 @@ void CompilerHLSL::emit_cooperative_matrix_muladd(const uint32_t *ops, uint32_t 
 	// SPIR-V returns D = A * B + C, dx::linalg accumulates into the matrix it is called on.
 	// C may have another component type than the result.
 	auto &type = get<SPIRType>(result_type);
-	string accumulator = to_unpacked_expression(c);
+	string accumulator = cooperative_matrix_copy(c);
 	if (cooperative_matrix_type_name(expression_type(c)) != cooperative_matrix_type_name(type))
 	{
 		accumulator = join(to_enclosed_unpacked_expression(c), ".Cast<dx::linalg::ComponentType::",
@@ -860,12 +860,22 @@ void CompilerHLSL::emit_cooperative_matrix_muladd(const uint32_t *ops, uint32_t 
 	inherit_expression_dependencies(id, c);
 }
 
+// A copy that is modified afterwards. A plain assignment is a correct copy in DXIL, but drivers have been
+// seen to then update the source in place too (NVIDIA, LinAlg preview); Cast to the same type emits an
+// explicit CopyConvertMatrix.
+string CompilerHLSL::cooperative_matrix_copy(uint32_t id)
+{
+	auto &component = get<SPIRType>(get_cooperative_matrix_type(expression_type(id))->parent_type);
+	return join(to_enclosed_unpacked_expression(id), ".Cast<dx::linalg::ComponentType::",
+	            cooperative_matrix_component(component), ">()");
+}
+
 // dx::linalg has no element-wise operators: copy op0, then rewrite every component this invocation holds.
 // op1 is another matrix, a scalar, or 0 for a unary op.
 void CompilerHLSL::emit_cooperative_matrix_elementwise(uint32_t result_type, uint32_t id, uint32_t op0,
                                                        const char *op, uint32_t op1)
 {
-	emit_op(result_type, id, to_unpacked_expression(op0), false);
+	emit_op(result_type, id, cooperative_matrix_copy(op0), false);
 	auto result = to_expression(id);
 
 	string rhs;
@@ -1058,7 +1068,7 @@ bool CompilerHLSL::maybe_emit_cooperative_matrix_op(const Instruction &instructi
 		// (object, composite, literal index): copy the matrix, then overwrite the one component.
 		if (length != 5)
 			return false;
-		emit_op(ops[0], ops[1], to_unpacked_expression(ops[3]), false);
+		emit_op(ops[0], ops[1], cooperative_matrix_copy(ops[3]), false);
 		statement(to_expression(ops[1]), ".Set(", ops[4], "u, ", to_unpacked_expression(ops[2]), ");");
 		inherit_expression_dependencies(ops[1], ops[3]);
 		inherit_expression_dependencies(ops[1], ops[2]);

@@ -410,6 +410,7 @@ private:
 	std::string constant_cooperative_matrix_expression(const SPIRConstant &c) override;
 	void emit_cooperative_matrix_muladd(const uint32_t *ops, uint32_t length);
 	bool maybe_emit_cooperative_matrix_op(const Instruction &instruction);
+	std::string cooperative_matrix_copy(uint32_t id);
 	void emit_cooperative_matrix_elementwise(uint32_t result_type, uint32_t id, uint32_t op0, const char *op,
 	                                         uint32_t op1);
 	void emit_cooperative_matrix_convert(uint32_t result_type, uint32_t id, uint32_t op0, Op opcode);
