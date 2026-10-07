@@ -409,6 +409,20 @@ private:
 	std::string cooperative_matrix_groupshared_args(uint32_t ptr, const SPIRType &matrix_type, uint32_t stride_id);
 	std::string constant_cooperative_matrix_expression(const SPIRConstant &c) override;
 	void emit_cooperative_matrix_muladd(const uint32_t *ops, uint32_t length);
+	bool maybe_emit_cooperative_matrix_op(const Instruction &instruction);
+	void emit_cooperative_matrix_elementwise(uint32_t result_type, uint32_t id, uint32_t op0, const char *op,
+	                                         uint32_t op1);
+	void emit_cooperative_matrix_convert(uint32_t result_type, uint32_t id, uint32_t op0, Op opcode);
+	bool emit_cooperative_matrix_element_access_chain(const uint32_t *ops, uint32_t length);
+
+	// Pointers to one component of a cooperative matrix: dx::linalg reads and writes those with Get / Set.
+	struct CooperativeMatrixElement
+	{
+		std::string matrix;
+		uint32_t index;
+		uint32_t base;
+	};
+	std::unordered_map<uint32_t, CooperativeMatrixElement> cooperative_matrix_elements;
 
 	std::string get_unique_identifier();
 	uint32_t unique_identifier_count = 0;
