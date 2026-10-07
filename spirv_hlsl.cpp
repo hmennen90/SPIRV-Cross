@@ -400,6 +400,9 @@ string CompilerHLSL::type_to_glsl(const SPIRType &type, uint32_t id)
 {
 	// Ignore the pointer type since GLSL doesn't have pointers.
 
+	if (get_cooperative_matrix_type(type))
+		return cooperative_matrix_type_name(type);
+
 	switch (type.basetype)
 	{
 	case SPIRType::Struct:
@@ -523,6 +526,237 @@ string CompilerHLSL::type_to_glsl(const SPIRType &type, uint32_t id)
 			return "???";
 		}
 	}
+}
+
+const SPIRType *CompilerHLSL::get_cooperative_matrix_type(const SPIRType &type) const
+{
+	// type_to_glsl() also sees ad-hoc types without a parent type, so walk defensively.
+	const SPIRType *t = &type;
+	while (t && t->op != OpTypeCooperativeMatrixKHR && (is_pointer(*t) || is_array(*t)) && t->parent_type)
+		t = maybe_get<SPIRType>(t->parent_type);
+	return t && t->op == OpTypeCooperativeMatrixKHR ? t : nullptr;
+}
+
+uint32_t CompilerHLSL::cooperative_matrix_literal(uint32_t id, const char *what) const
+{
+	auto *c = maybe_get<SPIRConstant>(id);
+	if (!c || c->specialization)
+		SPIRV_CROSS_THROW(join("HLSL does not support a specialization constant as cooperative matrix ", what, "."));
+	return c->scalar();
+}
+
+static const char *cooperative_matrix_component(const SPIRType &type)
+{
+	switch (type.basetype)
+	{
+	case SPIRType::SByte:
+		return "I8";
+	case SPIRType::UByte:
+		return "U8";
+	case SPIRType::Short:
+		return "I16";
+	case SPIRType::UShort:
+		return "U16";
+	case SPIRType::Int:
+		return "I32";
+	case SPIRType::UInt:
+		return "U32";
+	case SPIRType::Int64:
+		return "I64";
+	case SPIRType::UInt64:
+		return "U64";
+	case SPIRType::FloatE4M3:
+		return "F8_E4M3FN";
+	case SPIRType::FloatE5M2:
+		return "F8_E5M2";
+	case SPIRType::Half:
+		return "F16";
+	case SPIRType::Float:
+		return "F32";
+	case SPIRType::Double:
+		return "F64";
+	default:
+		SPIRV_CROSS_THROW("Unsupported cooperative matrix component type in HLSL.");
+	}
+}
+
+static const char *cooperative_matrix_use(uint32_t use)
+{
+	switch (use)
+	{
+	case CooperativeMatrixUseMatrixAKHR:
+		return "A";
+	case CooperativeMatrixUseMatrixBKHR:
+		return "B";
+	case CooperativeMatrixUseMatrixAccumulatorKHR:
+		return "Accumulator";
+	default:
+		SPIRV_CROSS_THROW("Invalid cooperative matrix use.");
+	}
+}
+
+static const char *cooperative_matrix_scope(uint32_t scope)
+{
+	switch (scope)
+	{
+	case ScopeSubgroup:
+		return "Wave";
+	case ScopeWorkgroup:
+		return "ThreadGroup";
+	default:
+		SPIRV_CROSS_THROW("HLSL cooperative matrices only support Subgroup and Workgroup scope.");
+	}
+}
+
+string CompilerHLSL::cooperative_matrix_type_name(const SPIRType &type) const
+{
+	auto &coop = *get_cooperative_matrix_type(type);
+	return join("spvCoopMat", cooperative_matrix_component(get<SPIRType>(coop.parent_type)), "_",
+	            cooperative_matrix_literal(coop.ext.cooperative.rows_id, "rows"), "x",
+	            cooperative_matrix_literal(coop.ext.cooperative.columns_id, "columns"), "_",
+	            cooperative_matrix_use(cooperative_matrix_literal(coop.ext.cooperative.use_id, "use")), "_",
+	            cooperative_matrix_scope(cooperative_matrix_literal(coop.ext.cooperative.scope_id, "scope")));
+}
+
+string CompilerHLSL::cooperative_matrix_dx_type(const SPIRType &type) const
+{
+	if (hlsl_options.shader_model < 610)
+		SPIRV_CROSS_THROW("Cooperative matrices require shader model 6.10 (dx::linalg) in HLSL.");
+
+	auto &coop = *get_cooperative_matrix_type(type);
+	auto &component = get<SPIRType>(coop.parent_type);
+	if ((component.basetype == SPIRType::Half || component.basetype == SPIRType::Short ||
+	     component.basetype == SPIRType::UShort) &&
+	    !hlsl_options.enable_16bit_types)
+	{
+		SPIRV_CROSS_THROW("16-bit cooperative matrices require native 16-bit types in HLSL.");
+	}
+
+	return join("dx::linalg::Matrix<dx::linalg::ComponentType::", cooperative_matrix_component(component), ", ",
+	            cooperative_matrix_literal(coop.ext.cooperative.rows_id, "rows"), ", ",
+	            cooperative_matrix_literal(coop.ext.cooperative.columns_id, "columns"),
+	            ", dx::linalg::MatrixUse::",
+	            cooperative_matrix_use(cooperative_matrix_literal(coop.ext.cooperative.use_id, "use")),
+	            ", dx::linalg::MatrixScope::",
+	            cooperative_matrix_scope(cooperative_matrix_literal(coop.ext.cooperative.scope_id, "scope")),
+	            ">");
+}
+
+void CompilerHLSL::emit_cooperative_matrix_typedefs()
+{
+	// The dx/linalg.h include is left to the caller; every distinct matrix type gets one short name.
+	std::unordered_set<std::string> declared;
+	ir.for_each_typed_id<SPIRType>([&](uint32_t, const SPIRType &type) {
+		if (type.op != OpTypeCooperativeMatrixKHR)
+			return;
+		auto name = cooperative_matrix_type_name(type);
+		if (declared.insert(name).second)
+			statement("typedef ", cooperative_matrix_dx_type(type), " ", name, ";");
+	});
+
+	if (!declared.empty())
+		statement("");
+}
+
+string CompilerHLSL::cooperative_matrix_layout(uint32_t layout_id)
+{
+	auto *c = maybe_get<SPIRConstant>(layout_id);
+	if (c && !c->specialization)
+	{
+		switch (c->scalar())
+		{
+		case CooperativeMatrixLayoutRowMajorKHR:
+			return "dx::linalg::MatrixLayout::RowMajor";
+		case CooperativeMatrixLayoutColumnMajorKHR:
+			return "dx::linalg::MatrixLayout::ColMajor";
+		default:
+			SPIRV_CROSS_THROW("HLSL cooperative matrices only support RowMajor and ColumnMajor layouts.");
+		}
+	}
+
+	// RowMajorKHR and ColumnMajorKHR share their values with MatrixLayout::RowMajor and ColMajor.
+	return join("(dx::linalg::MatrixLayoutEnum)", to_enclosed_expression(layout_id));
+}
+
+string CompilerHLSL::cooperative_matrix_stride(uint32_t stride_id, const SPIRType &pointee)
+{
+	// SPIR-V counts the stride in elements of the pointer type, dx::linalg in bytes.
+	uint32_t element_size = (pointee.width / 8) * pointee.vecsize;
+	if (element_size == 0 || pointee.columns != 1)
+		SPIRV_CROSS_THROW("Cooperative matrix load/store needs a pointer to a scalar or vector.");
+
+	auto *c = maybe_get<SPIRConstant>(stride_id);
+	if (c && !c->specialization)
+	{
+		uint32_t bytes = c->scalar() * element_size;
+		if (bytes % 4 != 0)
+			SPIRV_CROSS_THROW("dx::linalg requires a cooperative matrix stride that is a multiple of 4 bytes.");
+		return convert_to_string(bytes);
+	}
+
+	return join(to_enclosed_expression(stride_id), " * ", element_size);
+}
+
+uint32_t CompilerHLSL::cooperative_matrix_alignment(const uint32_t *memory_operands, uint32_t count) const
+{
+	// dx::linalg needs at least 4-byte aligned matrices in device memory, the default of its Align argument (128)
+	// is not guaranteed by SPIR-V. An Aligned memory operand can only raise it.
+	uint32_t alignment = 4;
+	if (count >= 2 && (memory_operands[0] & MemoryAccessAlignedMask) != 0)
+	{
+		if (memory_operands[1] < 4)
+			SPIRV_CROSS_THROW("dx::linalg requires cooperative matrices aligned to at least 4 bytes.");
+		alignment = memory_operands[1];
+	}
+	return alignment;
+}
+
+void CompilerHLSL::emit_cooperative_matrix_load(const uint32_t *ops, uint32_t length)
+{
+	if (length < 5)
+		SPIRV_CROSS_THROW("Cooperative matrix load needs a stride in HLSL.");
+
+	uint32_t result_type = ops[0];
+	uint32_t id = ops[1];
+	uint32_t ptr = ops[2];
+
+	auto *chain = maybe_get<SPIRAccessChain>(ptr);
+	if (!chain)
+		SPIRV_CROSS_THROW("HLSL cooperative matrix loads only support storage buffers for now.");
+	if (chain->dynamic_index.empty() && chain->static_index % 4 != 0)
+		SPIRV_CROSS_THROW("dx::linalg requires cooperative matrices aligned to at least 4 bytes.");
+
+	string expr = join(cooperative_matrix_type_name(get<SPIRType>(result_type)), "::Load(", chain->base, ", ",
+	                   chain->dynamic_index, chain->static_index, ", ",
+	                   cooperative_matrix_stride(ops[4], get<SPIRType>(chain->basetype)), ", ",
+	                   cooperative_matrix_layout(ops[3]), ", ",
+	                   cooperative_matrix_alignment(&ops[5], length - 5), ")");
+
+	track_expression_read(chain->self);
+	emit_op(result_type, id, expr, false);
+	register_read(id, ptr, false);
+	inherit_expression_dependencies(id, ptr);
+}
+
+void CompilerHLSL::emit_cooperative_matrix_store(const uint32_t *ops, uint32_t length)
+{
+	if (length < 4)
+		SPIRV_CROSS_THROW("Cooperative matrix store needs a stride in HLSL.");
+
+	uint32_t ptr = ops[0];
+	uint32_t object = ops[1];
+
+	auto *chain = maybe_get<SPIRAccessChain>(ptr);
+	if (!chain)
+		SPIRV_CROSS_THROW("HLSL cooperative matrix stores only support storage buffers for now.");
+	if (chain->dynamic_index.empty() && chain->static_index % 4 != 0)
+		SPIRV_CROSS_THROW("dx::linalg requires cooperative matrices aligned to at least 4 bytes.");
+
+	track_expression_read(chain->self);
+	statement(to_enclosed_expression(object), ".Store(", chain->base, ", ", chain->dynamic_index, chain->static_index,
+	          ", ", cooperative_matrix_stride(ops[3], get<SPIRType>(chain->basetype)), ", ",
+	          cooperative_matrix_layout(ops[2]), ", ", cooperative_matrix_alignment(&ops[4], length - 4), ");");
+	register_write(ptr);
 }
 
 void CompilerHLSL::emit_header()
@@ -1697,6 +1931,7 @@ void CompilerHLSL::emit_resources()
 		break;
 	}
 
+	emit_cooperative_matrix_typedefs();
 	emit_specialization_constants_and_structs();
 	emit_composite_constants();
 
@@ -6013,6 +6248,18 @@ void CompilerHLSL::emit_instruction(const Instruction &instruction)
 	case OpLoad:
 	{
 		emit_load(instruction);
+		break;
+	}
+
+	case OpCooperativeMatrixLoadKHR:
+	{
+		emit_cooperative_matrix_load(ops, length);
+		break;
+	}
+
+	case OpCooperativeMatrixStoreKHR:
+	{
+		emit_cooperative_matrix_store(ops, length);
 		break;
 	}
 

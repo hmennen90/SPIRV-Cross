@@ -395,6 +395,18 @@ private:
 
 	void validate_shader_model();
 
+	// Cooperative matrices map to SM 6.10 dx::linalg::Matrix, declared once per type as a typedef.
+	const SPIRType *get_cooperative_matrix_type(const SPIRType &type) const;
+	std::string cooperative_matrix_type_name(const SPIRType &type) const;
+	std::string cooperative_matrix_dx_type(const SPIRType &type) const;
+	void emit_cooperative_matrix_typedefs();
+	void emit_cooperative_matrix_load(const uint32_t *ops, uint32_t length);
+	void emit_cooperative_matrix_store(const uint32_t *ops, uint32_t length);
+	uint32_t cooperative_matrix_literal(uint32_t id, const char *what) const;
+	std::string cooperative_matrix_layout(uint32_t layout_id);
+	std::string cooperative_matrix_stride(uint32_t stride_id, const SPIRType &pointee);
+	uint32_t cooperative_matrix_alignment(const uint32_t *memory_operands, uint32_t count) const;
+
 	std::string get_unique_identifier();
 	uint32_t unique_identifier_count = 0;
 
