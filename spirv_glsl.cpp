@@ -13022,7 +13022,7 @@ CompilerGLSL::TemporaryCopy CompilerGLSL::handle_instruction_precision(const Ins
 	return {};
 }
 
-static pair<string, string> split_coopmat_pointer(const string &expr)
+pair<string, string> CompilerGLSL::split_coopmat_pointer(const string &expr)
 {
 	auto ptr_expr = expr;
 	string index_expr;

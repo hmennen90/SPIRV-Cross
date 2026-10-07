@@ -711,6 +711,75 @@ uint32_t CompilerHLSL::cooperative_matrix_alignment(const uint32_t *memory_opera
 	return alignment;
 }
 
+// Parses an unsigned literal expression such as "256u".
+static bool cooperative_matrix_literal_count(const string &expr, uint64_t &value)
+{
+	string digits = expr;
+	if (!digits.empty() && digits.back() == 'u')
+		digits.pop_back();
+	if (digits.empty() || digits.find_first_not_of("0123456789") != string::npos)
+		return false;
+	value = std::stoull(digits);
+	return true;
+}
+
+// Rescales an element count from one element size to another, folding literals.
+static string cooperative_matrix_rescale(const string &count, uint32_t from_bytes, uint32_t to_bytes)
+{
+	if (from_bytes == to_bytes)
+		return count;
+
+	uint64_t value;
+	if (cooperative_matrix_literal_count(count, value))
+	{
+		uint64_t bytes = value * from_bytes;
+		if (bytes % to_bytes != 0)
+			SPIRV_CROSS_THROW("Cooperative matrix offset or stride is not a whole number of matrix elements.");
+		return convert_to_string(bytes / to_bytes);
+	}
+
+	if (from_bytes > to_bytes)
+		return join("(", count, ") * ", from_bytes / to_bytes);
+	else
+		return join("(", count, ") / ", to_bytes / from_bytes);
+}
+
+string CompilerHLSL::cooperative_matrix_groupshared_args(uint32_t ptr, const SPIRType &matrix_type, uint32_t stride_id)
+{
+	auto &ptr_type = expression_type(ptr);
+	if (ptr_type.storage != StorageClassWorkgroup)
+		SPIRV_CROSS_THROW("HLSL cooperative matrices only load from and store to storage buffers and groupshared arrays.");
+
+	// dx::linalg takes a one-dimensional groupshared array of scalars whose type is the matrix component type, or
+	// 32-bit integers, which hold any component type bit for bit.
+	auto &component = get<SPIRType>(get_cooperative_matrix_type(matrix_type)->parent_type);
+	bool is_int32 = (ptr_type.basetype == SPIRType::Int || ptr_type.basetype == SPIRType::UInt) && ptr_type.width == 32;
+	bool same_type = ptr_type.basetype == component.basetype && ptr_type.width == component.width;
+	if (ptr_type.vecsize != 1 || ptr_type.columns != 1 || (!is_int32 && !same_type))
+		SPIRV_CROSS_THROW("A groupshared cooperative matrix array must hold the matrix component type or 32-bit integers.");
+
+	pair<string, string> split = { "", "0" };
+	if (!is_forcing_recompilation())
+		split = split_coopmat_pointer(to_expression(ptr));
+	if (split.first.find('[') != string::npos)
+		SPIRV_CROSS_THROW("HLSL cooperative matrices need a one-dimensional groupshared array.");
+
+	// SPIR-V counts the offset and stride in elements of the array, dx::linalg in matrix components.
+	uint32_t array_bytes = ptr_type.width / 8;
+	uint32_t component_bytes = component.width / 8;
+
+	// The offset and stride must be multiples of 4 bytes; checked where they are literals.
+	uint64_t offset;
+	if (cooperative_matrix_literal_count(split.second, offset) && (offset * array_bytes) % 4 != 0)
+		SPIRV_CROSS_THROW("dx::linalg requires cooperative matrices aligned to at least 4 bytes.");
+	auto *c = maybe_get<SPIRConstant>(stride_id);
+	if (c && !c->specialization && (c->scalar() * array_bytes) % 4 != 0)
+		SPIRV_CROSS_THROW("dx::linalg requires a cooperative matrix stride that is a multiple of 4 bytes.");
+
+	return join(split.first, ", ", cooperative_matrix_rescale(split.second, array_bytes, component_bytes), ", ",
+	            cooperative_matrix_rescale(to_expression(stride_id), array_bytes, component_bytes));
+}
+
 void CompilerHLSL::emit_cooperative_matrix_load(const uint32_t *ops, uint32_t length)
 {
 	if (length < 5)
@@ -722,7 +791,16 @@ void CompilerHLSL::emit_cooperative_matrix_load(const uint32_t *ops, uint32_t le
 
 	auto *chain = maybe_get<SPIRAccessChain>(ptr);
 	if (!chain)
-		SPIRV_CROSS_THROW("HLSL cooperative matrix loads only support storage buffers for now.");
+	{
+		auto &type = get<SPIRType>(result_type);
+		string expr = join(cooperative_matrix_type_name(type), "::Load(",
+		                   cooperative_matrix_groupshared_args(ptr, type, ops[4]), ", ",
+		                   cooperative_matrix_layout(ops[3]), ")");
+		emit_op(result_type, id, expr, false);
+		register_read(id, ptr, false);
+		inherit_expression_dependencies(id, ptr);
+		return;
+	}
 	if (chain->dynamic_index.empty() && chain->static_index % 4 != 0)
 		SPIRV_CROSS_THROW("dx::linalg requires cooperative matrices aligned to at least 4 bytes.");
 
@@ -748,7 +826,13 @@ void CompilerHLSL::emit_cooperative_matrix_store(const uint32_t *ops, uint32_t l
 
 	auto *chain = maybe_get<SPIRAccessChain>(ptr);
 	if (!chain)
-		SPIRV_CROSS_THROW("HLSL cooperative matrix stores only support storage buffers for now.");
+	{
+		statement(to_enclosed_expression(object), ".Store(",
+		          cooperative_matrix_groupshared_args(ptr, expression_type(object), ops[3]), ", ",
+		          cooperative_matrix_layout(ops[2]), ");");
+		register_write(ptr);
+		return;
+	}
 	if (chain->dynamic_index.empty() && chain->static_index % 4 != 0)
 		SPIRV_CROSS_THROW("dx::linalg requires cooperative matrices aligned to at least 4 bytes.");
 
